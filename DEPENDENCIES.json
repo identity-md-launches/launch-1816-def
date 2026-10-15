@@ -1,0 +1,26 @@
+[
+  {
+    "repository": "Uniswap/v4-core",
+    "commit": "59d3ecf53afa9264a16bba0e38f4c5d2231f80bc",
+    "archive_sha256": "130e1ae60c10254ecebadd9d963294617081da7fb3f7f5c3b98e3f0db06769a6",
+    "path": "lib/v4-core"
+  },
+  {
+    "repository": "foundry-rs/forge-std",
+    "commit": "77041d2ce690e692d6e03cc812b57d1ddaa4d505",
+    "archive_sha256": "a387f7c2a10387f889b0d18b999cfa667a5273ac11cc11e18923022eb8b24bc3",
+    "path": "lib/forge-std"
+  },
+  {
+    "repository": "OpenZeppelin/openzeppelin-contracts",
+    "commit": "acd4ff74de833399287ed6b31b4debf6b2b35527",
+    "archive_sha256": "7ca6287b8a0d0db67b5923c047365025e612dbaf58a49cbe74d05aa5213e36f9",
+    "path": "lib/openzeppelin-contracts"
+  },
+  {
+    "repository": "transmissions11/solmate",
+    "commit": "4b47a19038b798b4a33d9749d25e570443520647",
+    "archive_sha256": "9aa78449f8bc10931520500ec24734f089af9ac875a3334d8b512f8727241667",
+    "path": "lib/solmate"
+  }
+]
