@@ -6,6 +6,7 @@ import {PoolActor} from "./helpers/PoolActor.sol";
 import {ReflectionSequenceHandler} from "./helpers/ReflectionSequenceHandler.sol";
 import {ReflectionHook} from "../src/ReflectionHook.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
+import {PoolId} from "v4-core/src/types/PoolId.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {TransientStateLibrary} from "v4-core/src/libraries/TransientStateLibrary.sol";
 
@@ -38,7 +39,7 @@ contract ReflectionLifecycleInvariantTest is ReflectionFixture {
         }
         handler = new ReflectionSequenceHandler(hook, factory, actors, sinks);
 
-        bytes4[] memory selectors = new bytes4[](7);
+        bytes4[] memory selectors = new bytes4[](8);
         selectors[0] = ReflectionSequenceHandler.trade.selector;
         selectors[1] = ReflectionSequenceHandler.moveSink.selector;
         selectors[2] = ReflectionSequenceHandler.redeem.selector;
@@ -46,6 +47,7 @@ contract ReflectionLifecycleInvariantTest is ReflectionFixture {
         selectors[4] = ReflectionSequenceHandler.rejectSwap.selector;
         selectors[5] = ReflectionSequenceHandler.rejectLiquidity.selector;
         selectors[6] = ReflectionSequenceHandler.donate.selector;
+        selectors[7] = ReflectionSequenceHandler.launchLiquidity.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
@@ -94,12 +96,15 @@ contract ReflectionLifecycleInvariantTest is ReflectionFixture {
             assertEq(pm.currencyDelta(address(actors[i]), key.currency0), 0);
             assertEq(pm.currencyDelta(address(actors[i]), key.currency1), 0);
         }
-        assertEq(pm.getLiquidity(key.toId()), LIQUIDITY, "hook must never modify launch liquidity");
+        assertEq(
+            pm.getLiquidity(key.toId()), LIQUIDITY + handler.launchAdded(), "only the launch factory changes liquidity"
+        );
         (,, uint24 protocolFee, uint24 lpFee) = pm.getSlot0(key.toId());
         assertEq(protocolFee, 0);
-        assertEq(lpFee, 0);
+        assertEq(lpFee, LP_FEE, "the LP fee the factory opened with never changes");
         assertTrue(hook.initialized());
-        assertTrue(hook.liquiditySeeded());
+        assertEq(hook.lpFee(), LP_FEE);
+        assertEq(hook.poolId(), PoolId.unwrap(key.toId()));
         assertEq(hook.owner(), owner);
         assertEq(hook.FEE_BPS(), 225);
     }
@@ -128,6 +133,10 @@ contract ReflectionLifecycleInvariantTest is ReflectionFixture {
         handler.rejectSwap(1, false, true, uint96(1 ether));
         handler.rejectSwap(2, true, false, uint96(1 ether));
         handler.rejectLiquidity(1, true);
+        handler.rejectLiquidity(2, false);
+        handler.launchLiquidity(uint96(500 ether), 0); // The factory adds again after launch.
+        handler.launchLiquidity(uint96(200 ether), 1); // ...and removes part of what it added.
+        handler.launchLiquidity(0, 2); // ...and collects its LP fees with a zero change.
         handler.moveSink(1);
         handler.rejectAdministrationOrClaim(3, 2);
         handler.rejectAdministrationOrClaim(4, 0);
@@ -138,6 +147,8 @@ contract ReflectionLifecycleInvariantTest is ReflectionFixture {
         handler.moveSink(2);
         handler.redeem(false, 0);
         assertEq(handler.successfulSwaps(), 3);
+        assertEq(handler.launchLiquidityCalls(), 3);
+        assertEq(handler.launchAdded(), 300 ether);
         assertGt(handler.partialFills(), 0);
         assertGt(handler.earned(), 0);
         assertGt(token.balanceOf(sinks[1]), 0);

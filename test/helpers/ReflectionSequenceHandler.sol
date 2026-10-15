@@ -24,6 +24,8 @@ contract ReflectionSequenceHandler is Test {
 
     bytes32 private constant SWAP = keccak256("Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)");
     bytes32 private constant FEE = keccak256("ReflectionFee(address,bool,uint256)");
+    int24 private constant LOWER = -887220;
+    int24 private constant UPPER = 887220;
     IPoolManager public immutable manager;
     ReflectionHook public immutable hook;
     DEF public immutable token;
@@ -39,6 +41,9 @@ contract ReflectionSequenceHandler is Test {
     uint256 public successfulSwaps;
     uint256 public partialFills;
     uint256 public rejectedCalls;
+    /// @dev Liquidity the factory added after the seed and has not removed; the seed itself is never removed.
+    uint256 public launchAdded;
+    uint256 public launchLiquidityCalls;
 
     struct Observation {
         int128 eth;
@@ -195,15 +200,45 @@ contract ReflectionSequenceHandler is Test {
         ++rejectedCalls;
     }
 
-    function rejectLiquidity(uint8 actorSeed, bool asFactory) external {
-        PoolActor actor = asFactory ? factory : actors[actorSeed % 3];
+    /// @dev Nobody but the launch may ever add liquidity, whatever the sink and swap history.
+    function rejectLiquidity(uint8 actorSeed, bool concentrated) external {
+        PoolActor actor = actors[actorSeed % 3];
         bytes32 before_ = stateDigest();
-        ModifyLiquidityParams memory add = ModifyLiquidityParams(-887220, 887220, 1, bytes32(0));
+        ModifyLiquidityParams memory add = concentrated
+            ? ModifyLiquidityParams(-60, 60, 1 ether, bytes32(0))
+            : ModifyLiquidityParams(LOWER, UPPER, 1, bytes32(0));
         (bool ok, bytes memory reason) = address(actor).call(abi.encodeCall(PoolActor.modify, (key, add)));
         assertFalse(ok);
         assertEq(reason, wrapped(IHooks.beforeAddLiquidity.selector, ReflectionHook.LiquidityLocked.selector));
         assertEq(stateDigest(), before_, "liquidity lock must survive all sink and swap sequences");
         ++rejectedCalls;
+    }
+
+    /// @dev The launch factory may add to its full-range position again, remove what it added, or
+    /// collect its LP fees with a zero change. None of these may charge a reflection fee or touch claims.
+    function launchLiquidity(uint96 amount, uint8 mode) external {
+        mode %= 3;
+        int256 change;
+        if (mode == 0) {
+            change = int256(bound(amount, 1, 1_000 ether));
+            launchAdded += uint256(change);
+        } else if (mode == 1 && launchAdded > 0) {
+            change = -int256(bound(amount, 1, launchAdded));
+            launchAdded -= uint256(-change);
+        }
+        uint256 beforeClaims = hook.collected();
+        uint256 beforeLiquidity = manager.getLiquidity(key.toId());
+        vm.recordLogs();
+        BalanceDelta delta = factory.modify(key, ModifyLiquidityParams(LOWER, UPPER, change, bytes32(0)));
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; ++i) {
+            assertFalse(logs[i].emitter == address(hook) && logs[i].topics[0] == FEE, "liquidity has no hook fee");
+        }
+        if (change == 0) assertGe(delta.amount0(), 0, "a fee collect never makes the factory pay");
+        if (change == 0) assertGe(delta.amount1(), 0, "a fee collect never makes the factory pay");
+        assertEq(hook.collected(), beforeClaims, "launch liquidity cannot move reflection claims");
+        assertEq(int256(uint256(manager.getLiquidity(key.toId()))), int256(beforeLiquidity) + change);
+        ++launchLiquidityCalls;
     }
 
     function donate(uint8 actorSeed, uint96 input0, uint96 input1) external {

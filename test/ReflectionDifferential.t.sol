@@ -115,9 +115,11 @@ contract ReflectionDifferentialTest is ReflectionFixture {
         assertEq(protocolFee, plainProtocolFee);
         assertEq(lpFee, plainLpFee);
         assertEq(taxed.getLiquidity(key.toId()), plain.getLiquidity(plainKey.toId()));
+        // Both pools carry the same LP fee, so the LP fee growth must match too: the hook adds nothing to it.
         (uint256 f0, uint256 f1) = taxed.getFeeGrowthGlobals(key.toId());
-        assertEq(f0, 0);
-        assertEq(f1, 0);
+        (uint256 plainF0, uint256 plainF1) = plain.getFeeGrowthGlobals(plainKey.toId());
+        assertEq(f0, plainF0, "hook must not change the ETH LP fee");
+        assertEq(f1, plainF1, "hook must not change the DEF LP fee");
     }
 
     function test_insufficientDefSettlementRollsBackSellFeeAndPoolState() public {
