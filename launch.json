@@ -1,0 +1,33 @@
+{
+  "kind": "univ4_hook",
+  "hook": {
+    "contract": "ReflectionHook",
+    "constructorArgs": [
+      "$poolManager",
+      "$token",
+      "$owner",
+      "$factory"
+    ],
+    "permissions": [
+      "beforeInitialize",
+      "beforeAddLiquidity",
+      "beforeSwap",
+      "afterSwap",
+      "beforeSwapReturnDelta",
+      "afterSwapReturnDelta"
+    ]
+  },
+  "token": {
+    "contract": "DEF",
+    "name": "DEF",
+    "symbol": "DEF",
+    "decimals": 18
+  },
+  "pool": {
+    "pairedCurrency": "0x0000000000000000000000000000000000000000",
+    "fee": 12500,
+    "tickSpacing": 60,
+    "initialPrice": "79228162514264337593543950336"
+  },
+  "notes": "ReflectionHook charges an immutable FEE_BPS of 225 (2.25%) of the DEF side of every exact-input swap on one native ETH/DEF Uniswap v4 pool. Buys (ETH in, DEF out) mint the fee to the hook as a DEF ERC-6909 claim in afterSwap and return it as the afterSwap delta, so the buyer receives 97.75% of the pool's DEF output. Sells (DEF in, ETH out) mint the fee in beforeSwap and return toBeforeSwapDelta(fee, 0), so 97.75% of the specified DEF enters the pool. Exact-output swaps revert ExactOutputUnsupported(). Every fee emits ReflectionFee(swapper, buy, defAmount). The hook never takes ETH, never swaps, never touches liquidity, and holds no ETH balance or ETH claim. collected() reads the hook's DEF claim balance. flush() may be called by anyone: it burns the whole DEF claim inside poolManager.unlock, takes the DEF to the sink, emits Flushed(sink, amount), and reverts SinkNotSet() while the sink is zero or NothingToFlush() when nothing is collected. The sink can pull without a keeper through claim(DEF, sink), restricted to the sink (NotSink()) and the DEF currency (WrongCurrency()); claimable(sink, DEF) equals collected() and is 0 for any other account or currency. The owner's only power is setSink(address): owner-only (NotOwner()), refuses zero (ZeroAddress()), emits SinkSet, and may be called again to move the sink. Ownership is immutable; there is no pause, rate change, blocklist, upgrade, or any withdrawal path other than flush/claim to the sink. Constructor arguments, in declaration order: IPoolManager ($poolManager), DEF token ($token), owner ($owner), launch factory ($factory); all must be nonzero. The brief wrote LP fee 0, but the launch policy opens every hook pool at 12500, so the hook does not hardcode an LP fee: beforeInitialize accepts only the factory (or the hook itself) opening the ETH/DEF, tick-spacing-60 pool on this hook at any static LP fee (the dynamic-fee flag is refused), records that key once, and rejects any later initialize. poolKey(), poolId() and lpFee() report the recorded pool; pool.fee 12500 here is the LP fee the hook will serve and is separate from the 2.25% reflection fee charged on top of it. beforeAddLiquidity accepts only the factory or the hook itself on the recorded pool and reverts LiquidityLocked() for everyone else, so the pool's liquidity is the launch liquidity. Removal, zero-liquidity fee collection and donation callbacks are disabled in getHookPermissions and, if reached, return their selector with no delta. No oracle, signer, backend or external contract is used beyond the PoolManager and DEF. initialPrice is written as the launch reference gives it; the deployer derives the opening price from the policy's opening market cap. DEF is a fixed-supply ERC-20 with no constructor arguments, minted once to its deployer, the factory."
+}
