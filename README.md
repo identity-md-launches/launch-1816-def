@@ -4,7 +4,7 @@ DEF is a standard ERC-20 named **DEF**, symbol **DEF**, with 18 decimals and a f
 
 `ReflectionHook` charges **225 basis points (2.25%) in DEF only** on one Uniswap v4 native ETH/DEF pool. It stores fees as PoolManager ERC-6909 claims. It never calls swap or modifyLiquidity, accepts ETH, approves an operator, or transfers assets to its owner. The owner's sole administrative function is `setSink(address)`.
 
-The explicit assignment controls the economics: the pool's **LP fee is 0**, its tick spacing is **60**, and the reflection fee is in **DEF**. The conflicting 1.25% LP fee / ETH collection defaults in the background reference are not implemented.
+The explicit assignment controls the hook's economics: its tick spacing is **60** and the reflection fee is in **DEF**, not ETH. The pool's **LP fee is the launch factory's to set**: the brief names 0, while the launch policy opens every hook pool at its 12500 (1.25%) tier and admits no other. The hook therefore does not hardcode an LP fee. `beforeInitialize` accepts the ETH/DEF, spacing-60 pool the factory opens at any static LP fee (never the dynamic-fee flag) and records that key; `poolKey()`, `poolId()` and `lpFee()` report it from then on. The LP fee accrues to the factory's position as in any v4 pool and is separate from the 2.25% reflection fee, which is charged on top of it. The ETH-settled hook fee suggested by the background reference is not implemented; the brief's DEF-side fee is.
 
 ## Build and test
 
@@ -18,11 +18,11 @@ forge fmt --check
 
 Foundry pins Solidity **0.8.26**, EVM **Cancun**, optimizer 200 runs and `bytecode_hash = "none"`. The fuzz seed is also pinned in `foundry.toml`. All Solidity dependencies are vendored as ordinary source files under `lib/`; there are no submodules, npm installs or runtime network dependencies. With the compiler installed, `forge build --offline` and `forge test --offline` need no network. No FFI or filesystem permissions are enabled.
 
-Tests deploy the real v4 `PoolManager` and CREATE2-mine the actual hook, without overriding permission checks or mocking settlement. They cover the requested eight behaviors, output/input accounting against the manager's `Swap` event, dust, price-limit partial fills, token-only pool seeding, rollback on failure, all callback caller checks, initialization restrictions, removals and donations, fixed supply, constructor checks, permission mining and the absence of administrative escape paths. Stateful invariants interleave buys, sells, flushes, claims and sink changes, checking conservation, redemption accounting and zero outstanding deltas.
+Tests deploy the real v4 `PoolManager` and CREATE2-mine the actual hook, without overriding permission checks or mocking settlement. They open the pool at the policy's 12500 tier, and separately at the brief's 0 tier, at 3000 and at fuzzed static fees. They cover the requested eight behaviors, output/input accounting against the manager's `Swap` event, dust, price-limit partial fills, token-only pool seeding, rollback on failure, all callback caller checks, initialization restrictions (every other pool shape, the dynamic-fee flag, a second pool), removals and donations, fixed supply, constructor checks, permission mining and the absence of administrative escape paths. Stateful invariants interleave buys, sells, flushes, claims and sink changes, checking conservation, redemption accounting and zero outstanding deltas.
 
 ## Swap accounting
 
-The pool key is always `(native ETH, DEF, 0, 60, this hook)`. Native ETH is `currency0 = address(0)`; DEF is `currency1`. `poolId()` is the Uniswap v4 hash of that key, available before initialization.
+The pool key is `(native ETH, DEF, lpFee, 60, this hook)`, where `lpFee` is the static LP fee the factory opened the pool with (12500 under the launch policy). Native ETH is `currency0 = address(0)`; DEF is `currency1`. `poolId()` is the Uniswap v4 hash of that key. Before the factory opens the pool, `lpFee()` and `poolId()` read zero, `initialized()` is false, and every swap or liquidity callback reverts `WrongPool()`; the hook serves exactly one pool, the first one the factory initializes.
 
 | Trade | Fee basis | Claim and delta | Result |
 | --- | --- | --- | --- |
@@ -56,10 +56,10 @@ The launch context identifies Sepolia (11155111) and owner `0x66636a1a49df648075
 2. With the final token address and constructor arguments, mine a CREATE2 salt using the **actual CREATE2 deployer's address** and final compiled initcode. The low 14 address bits must equal **`0x28cc` (10444)**. Enabled flags are exactly beforeInitialize, beforeAddLiquidity, beforeSwap, afterSwap, beforeSwapReturnDelta and afterSwapReturnDelta.
 3. `MineReflectionHook.run(create2Deployer, manager, token, owner, factory, start, count)` returns a salt and predicted address without reading the environment, contacting a network or broadcasting. Search in bounded batches (for example, 200,000 salts). Continue from a new `start` if it raises `SaltNotFound()`. Salt mining is an off-chain operation; do not pay to run the search on-chain. Deployment tests invoke this exact function and then CREATE2-deploy the result.
 4. Deploy the hook with that salt. The constructor rejects mismatching permission bits. A different compiler setting, argument, token address or deployer changes the address and requires mining again.
-5. The configured factory calls `PoolManager.initialize(hook.poolKey(), openingSqrtPriceX96)`, then seeds **one positive liquidity addition** through its own unlock callback. It should deploy, initialize and seed atomically. The opening price, tick range, liquidity amount and settlement funding are launch-factory inputs; the hook does not choose them. The supplied launch context assigns the opening valuation to the deployer. The 1:1 price in local tests is a test fixture, not a production price instruction.
-6. Initialization accepts only the configured factory (or the hook itself), only the exact key, and only once. The first positive liquidity addition is similarly restricted and consumes the one-use allowance. Every later positive addition reverts `LiquidityLocked()`, including factory additions. There is no owner override or reopen function. Failed initialization or liquidity settlement rolls back these flags.
+5. The configured factory calls `PoolManager.initialize` with the key `(ETH, DEF, pool.fee, 60, hook)` from its manifest and the opening price, then seeds its liquidity through its own unlock callback, in one or several positions. It should deploy, initialize and seed atomically. The LP fee, opening price, tick ranges, liquidity amounts and settlement funding are launch-factory inputs; the hook does not choose them. The supplied launch context assigns the opening valuation to the deployer. The 1:1 price in local tests is a test fixture, not a production price instruction.
+6. Initialization accepts only the configured factory (or the hook itself), only an ETH/DEF, spacing-60 key on this hook with a static LP fee, and only once; the accepted key is recorded. Adding liquidity accepts only the factory (or the hook itself) on that recorded pool: every addition by anyone else reverts `LiquidityLocked()`, before and after launch. There is no owner override or reopen function. A failed initialization or liquidity settlement rolls back with the transaction.
 
-The factory must add through its own address, not an unrelated position-manager router. Multiple seed positions are not supported. Removals, zero-liquidity fee collection and donations are unrestricted by the hook and carry no reflection charge. The initial LP position belongs to the factory; **the hook does not lock its withdrawal**. A full withdrawal cannot be followed by a new addition.
+The factory must add through its own address, not an unrelated position-manager router. Removals, zero-liquidity fee collection and donations are unrestricted by the hook and carry no reflection charge. The LP positions belong to the factory; **the hook does not lock their withdrawal**, and the factory may add again later. Nobody else can ever add liquidity to this pool.
 
 The launch's separate manifest step supplies deployment values; no `launch.json` is authored here. This repository performs no deployment or broadcast.
 
@@ -73,7 +73,7 @@ Fees accrue before the sink is set. `flush()` then reverts `SinkNotSet()`. Once 
 | --- | --- | --- |
 | `collected()` | Anyone | Actual PoolManager DEF claim balance owned by the hook |
 | `flush()` | Anyone | Unlock, burn the whole DEF claim balance, take exactly that much DEF to the current sink; emit `Flushed` and return the amount |
-| `claimable(account, currency)` | Anyone | `collected()` if account equals sink and currency equals DEF, otherwise zero |
+| `claimable(account, currency)` | Anyone | `collected()` if a sink is set, account equals it and currency equals DEF, otherwise zero |
 | `claim(currency, to)` | Current sink only | Same redemption; `to` must equal sink (`NotSink()` otherwise), currency must equal DEF (`WrongCurrency()` otherwise) |
 
 With no fees waiting, redemption reverts `NothingToFlush()`. The sink can pull directly without a keeper. For an EOA sink, anyone may flush; a contract sink must call `claim(DEF, itself)` to pull. DEF is an ordinary ERC-20, so receiving fees needs no ETH receiver or token callback.
@@ -82,7 +82,7 @@ Changing sink redirects **all pending and future fees** immediately and revokes 
 
 Call redemption while PoolManager is locked (outside another active `unlock`); nested unlocks revert atomically and leave claims intact. Redemption's callback accepts only PoolManager and only during a requested flush; caller-supplied callback bytes cannot select an amount or recipient.
 
-The owner should select a recipient that can actually use DEF, rather than the hook or manager. Direct ERC-20 transfers to the hook are **not** fee claims and cannot be rescued. `claimable(address(0), DEF)` reports the claim balance before sink configuration under the exact address-equality rule, but no normal caller can redeem as the zero address. The no-ETH property covers this contract's execution paths: EVM-forced ETH or unsolicited ERC-6909 transfers cannot be prevented, and there is deliberately no recovery mechanism for unrelated assets.
+The owner should select a recipient that can actually use DEF, rather than the hook or manager. Direct ERC-20 transfers to the hook are **not** fee claims and cannot be rescued. While no sink is set, `claimable` returns zero for every account (including the zero address) and `claim` reverts `NotSink()` for every caller: fees accrue, but nobody is entitled to them until `setSink`. The no-ETH property covers this contract's execution paths: EVM-forced ETH or unsolicited ERC-6909 transfers cannot be prevented, and there is deliberately no recovery mechanism for unrelated assets.
 
 ## Dependencies and review
 

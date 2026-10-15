@@ -21,6 +21,8 @@ import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 
 abstract contract ReflectionFixture is Test {
     uint160 internal constant Q96 = 79228162514264337593543950336;
+    /// @dev The hook launch policy's LP fee tier (1.25%); the hook accepts whatever static fee the factory opens.
+    uint24 internal constant LP_FEE = 12_500;
     uint128 internal constant LIQUIDITY = 1_000_000 ether;
     int24 internal constant LOWER = -887220;
     int24 internal constant UPPER = 887220;
@@ -47,7 +49,7 @@ abstract contract ReflectionFixture is Test {
         factory = new PoolActor(manager);
         trader = new PoolActor(manager);
         hook = deployHook(manager, token, factory);
-        key = hook.poolKey();
+        key = launchKey(hook, LP_FEE);
         token.transfer(address(factory), 10_000_000 ether);
         token.transfer(address(trader), 10_000_000 ether);
         vm.deal(address(factory), 10_000_000 ether);
@@ -62,6 +64,11 @@ abstract contract ReflectionFixture is Test {
         (bytes32 salt, address predicted) = HookAddress.find(address(deployer), keccak256(code), 0, 200_000);
         deployed = ReflectionHook(deployer.deploy(code, salt));
         assertEq(address(deployed), predicted);
+    }
+
+    /// @dev The key the launch factory opens: ETH/DEF, the manifest's fee, spacing 60, this hook.
+    function launchKey(ReflectionHook h, uint24 fee) internal view returns (PoolKey memory) {
+        return PoolKey(Currency.wrap(address(0)), Currency.wrap(address(h.def())), fee, 60, IHooks(address(h)));
     }
 
     function params(bool isBuy, int256 amount) internal pure returns (SwapParams memory) {
@@ -88,13 +95,25 @@ abstract contract ReflectionFixture is Test {
     }
 
     function hookError(bytes4 callback, bytes4 reason) internal view returns (bytes memory) {
+        return hookError(address(hook), callback, reason);
+    }
+
+    function hookError(address h, bytes4 callback, bytes4 reason) internal pure returns (bytes memory) {
         return abi.encodeWithSelector(
             CustomRevert.WrappedError.selector,
-            address(hook),
+            h,
             callback,
             abi.encodeWithSelector(reason),
             abi.encodeWithSelector(Hooks.HookCallFailed.selector)
         );
+    }
+
+    /// @dev A second launch on the same manager: its own factory actor (so CREATE2 finds a fresh address), funded.
+    function freshLaunch() internal returns (PoolActor launcher, ReflectionHook fresh) {
+        launcher = new PoolActor(manager);
+        token.transfer(address(launcher), 1_000_000 ether);
+        vm.deal(address(launcher), 1_000_000 ether);
+        fresh = deployHook(manager, token, launcher);
     }
 
     function readSwap(Vm.Log[] memory logs) internal view returns (int128 a0, int128 a1) {

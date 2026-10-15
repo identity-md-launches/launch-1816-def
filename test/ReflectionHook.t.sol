@@ -11,6 +11,7 @@ import {PoolManager} from "v4-core/src/PoolManager.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
+import {LPFeeLibrary} from "v4-core/src/libraries/LPFeeLibrary.sol";
 import {SafeCast} from "v4-core/src/libraries/SafeCast.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {TransientStateLibrary} from "v4-core/src/libraries/TransientStateLibrary.sol";
@@ -37,12 +38,14 @@ contract ReflectionHookTest is ReflectionFixture {
         assertEq(hook.sink(), address(0));
         assertEq(Currency.unwrap(key.currency0), address(0));
         assertEq(Currency.unwrap(key.currency1), address(token));
-        assertEq(key.fee, 0);
+        assertEq(key.fee, LP_FEE);
         assertEq(key.tickSpacing, 60);
+        assertEq(hook.TICK_SPACING(), 60);
         assertEq(address(key.hooks), address(hook));
+        assertEq(hook.lpFee(), LP_FEE);
+        assertEq(keccak256(abi.encode(hook.poolKey())), keccak256(abi.encode(key)));
         assertEq(hook.poolId(), PoolId.unwrap(key.toId()));
         assertTrue(hook.initialized());
-        assertTrue(hook.liquiditySeeded());
         Hooks.Permissions memory p = hook.getHookPermissions();
         assertTrue(p.beforeInitialize && p.beforeAddLiquidity && p.beforeSwap && p.afterSwap);
         assertTrue(p.beforeSwapReturnDelta && p.afterSwapReturnDelta);
@@ -209,12 +212,20 @@ contract ReflectionHookTest is ReflectionFixture {
         assertEq(hook.collected(), waiting);
     }
 
-    function test_unsetClaimCannotBeCalledAndClaimableFollowsExactAccountRule() public {
+    function test_nothingIsClaimableByAnyoneUntilASinkIsSet() public {
         buy(1 ether);
+        assertGt(hook.collected(), 0);
         assertEq(hook.claimable(sink, address(token)), 0);
-        assertEq(hook.claimable(address(0), address(token)), hook.collected());
+        assertEq(hook.claimable(address(0), address(token)), 0, "the unset sink owns nothing");
+        assertEq(hook.claimable(owner, address(token)), 0);
         vm.expectRevert(ReflectionHook.NotSink.selector);
         hook.claim(address(token), address(this));
+        vm.prank(address(0));
+        vm.expectRevert(ReflectionHook.NotSink.selector);
+        hook.claim(address(token), address(0));
+        setSink(sink);
+        assertEq(hook.claimable(sink, address(token)), hook.collected());
+        assertEq(hook.claimable(address(0), address(token)), 0);
     }
 
     function test_onlyOwnerSetsNonzeroSinkAndEmits() public {
@@ -252,11 +263,9 @@ contract ReflectionHookTest is ReflectionFixture {
         assertGt(token.balanceOf(other), waiting);
     }
 
-    function test_allFurtherLiquidityAddsRevertIncludingFactoryAndOwner() public {
+    function test_liquidityAddsAfterLaunchRevertForEveryoneButTheLaunch() public {
         ModifyLiquidityParams memory add = ModifyLiquidityParams(LOWER, UPPER, 1 ether, bytes32(0));
         bytes memory reason = hookError(IHooks.beforeAddLiquidity.selector, ReflectionHook.LiquidityLocked.selector);
-        vm.expectRevert(reason);
-        factory.modify(key, add);
         vm.expectRevert(reason);
         trader.modify(key, add);
         vm.prank(address(manager));
@@ -264,14 +273,29 @@ contract ReflectionHookTest is ReflectionFixture {
         hook.beforeAddLiquidity(owner, key, add, "");
         vm.prank(address(manager));
         vm.expectRevert(ReflectionHook.LiquidityLocked.selector);
-        hook.beforeAddLiquidity(address(hook), key, add, "");
+        hook.beforeAddLiquidity(sink, key, add, "");
+        // The launch itself is never locked out: a second factory position (another range) is accepted.
+        BalanceDelta seeded = factory.modify(key, ModifyLiquidityParams(-60, 60, 1 ether, bytes32(0)));
+        assertLt(seeded.amount0(), 0);
+        assertLt(seeded.amount1(), 0);
+        vm.prank(address(manager));
+        assertEq(hook.beforeAddLiquidity(address(hook), key, add, ""), IHooks.beforeAddLiquidity.selector);
+        // The gate is on the sender, not the key: the launch cannot add to a different pool either.
+        PoolKey memory wrong = key;
+        wrong.fee = 3000;
+        vm.prank(address(manager));
+        vm.expectRevert(ReflectionHook.WrongPool.selector);
+        hook.beforeAddLiquidity(address(factory), wrong, add, "");
+        assertNoEth();
     }
 
     function test_removalZeroLiquidityCollectAndDonationHaveNoHookFee() public {
         buy(1 ether);
         uint256 waiting = hook.collected();
+        // The factory's zero-liquidity collect is let through and only ever pays the factory (the buy's ETH LP fee).
         BalanceDelta collect = factory.modify(key, ModifyLiquidityParams(LOWER, UPPER, 0, bytes32(0)));
-        assertEq(BalanceDelta.unwrap(collect), 0, "LP fee is zero");
+        assertGt(collect.amount0(), 0, "the LP fee tier accrues to the position");
+        assertEq(collect.amount1(), 0);
         trader.donate(key, 1 ether, 2 ether);
         collect = factory.modify(key, ModifyLiquidityParams(LOWER, UPPER, 0, bytes32(0)));
         assertApproxEqAbs(uint256(int256(collect.amount0())), 1 ether, 1);
@@ -287,37 +311,115 @@ contract ReflectionHookTest is ReflectionFixture {
         vm.prank(address(manager));
         vm.expectRevert(ReflectionHook.AlreadyInitialized.selector);
         hook.beforeInitialize(address(factory), key, Q96);
+        // A second pool on this hook at another static fee is refused: the hook serves one pool.
+        PoolKey memory second = key;
+        second.fee = 0;
+        vm.expectRevert(hookError(IHooks.beforeInitialize.selector, ReflectionHook.AlreadyInitialized.selector));
+        factory.initialize(second, Q96);
+        second.fee = 3000;
+        vm.expectRevert(hookError(IHooks.beforeInitialize.selector, ReflectionHook.AlreadyInitialized.selector));
+        factory.initialize(second, Q96);
         PoolKey memory wrong = key;
-        wrong.fee = 12500;
-        vm.expectRevert(hookError(IHooks.beforeInitialize.selector, ReflectionHook.WrongPool.selector));
-        factory.initialize(wrong, Q96);
-        wrong = key;
         wrong.tickSpacing = 120;
         vm.expectRevert(hookError(IHooks.beforeInitialize.selector, ReflectionHook.WrongPool.selector));
         factory.initialize(wrong, Q96);
+        assertEq(hook.lpFee(), LP_FEE);
+        assertEq(hook.poolId(), PoolId.unwrap(key.toId()));
+    }
+
+    function test_factoryOpensThePoolAtThePolicyFeeTierAndTheBriefsZeroTier() public {
+        uint24[3] memory fees = [uint24(12_500), 0, 3000];
+        for (uint256 i; i < fees.length; ++i) {
+            checkOpensAt(fees[i]);
+        }
+    }
+
+    function testFuzz_factoryOpensThePoolAtAnyStaticFee(uint24 fee) public {
+        checkOpensAt(uint24(bound(fee, 0, LPFeeLibrary.MAX_LP_FEE)));
+    }
+
+    function checkOpensAt(uint24 fee) internal {
+        (PoolActor launcher, ReflectionHook fresh) = freshLaunch();
+        assertFalse(fresh.initialized());
+        assertEq(fresh.poolId(), bytes32(0));
+        assertEq(fresh.lpFee(), 0);
+        PoolKey memory freshKey = launchKey(fresh, fee);
+        launcher.initialize(freshKey, Q96);
+        assertTrue(fresh.initialized());
+        assertEq(fresh.lpFee(), fee);
+        assertEq(fresh.poolKey().fee, fee);
+        assertEq(keccak256(abi.encode(fresh.poolKey())), keccak256(abi.encode(freshKey)));
+        assertEq(fresh.poolId(), PoolId.unwrap(freshKey.toId()));
+        (uint160 price,,, uint24 lpFee) = IPoolManager(address(manager)).getSlot0(freshKey.toId());
+        assertEq(price, Q96);
+        assertEq(lpFee, fee);
+        // The pool trades and the reflection fee is charged on it as on any other.
+        launcher.modify(freshKey, ModifyLiquidityParams(LOWER, UPPER, int256(uint256(LIQUIDITY)), bytes32(0)));
+        BalanceDelta bought = trader.swap(freshKey, params(true, -1 ether));
+        assertGt(bought.amount1(), 0);
+        assertEq(fresh.collected(), (uint256(int256(bought.amount1())) + fresh.collected()) * 225 / 10_000);
+    }
+
+    function test_initializationRefusesEveryOtherPoolShape() public {
+        (PoolActor launcher, ReflectionHook fresh) = freshLaunch();
+        bytes memory reason =
+            hookError(address(fresh), IHooks.beforeInitialize.selector, ReflectionHook.WrongPool.selector);
+        PoolKey memory wrong = launchKey(fresh, LPFeeLibrary.DYNAMIC_FEE_FLAG);
+        vm.expectRevert(reason);
+        launcher.initialize(wrong, Q96);
+        wrong = launchKey(fresh, LP_FEE);
+        wrong.tickSpacing = 10;
+        vm.expectRevert(reason);
+        launcher.initialize(wrong, Q96);
+        wrong = launchKey(fresh, LP_FEE);
+        wrong.currency1 = Currency.wrap(address(new DEF()));
+        vm.expectRevert(reason);
+        launcher.initialize(wrong, Q96);
+        wrong = launchKey(fresh, LP_FEE);
+        address lower = address(uint160(address(token)) - 1);
+        vm.etch(lower, address(token).code);
+        wrong.currency0 = Currency.wrap(lower);
+        vm.expectRevert(reason);
+        launcher.initialize(wrong, Q96);
+        // Too large a static fee is the PoolManager's own refusal, after the hook accepted the shape.
+        wrong = launchKey(fresh, LPFeeLibrary.MAX_LP_FEE + 1);
+        vm.expectRevert(abi.encodeWithSelector(LPFeeLibrary.LPFeeTooLarge.selector, LPFeeLibrary.MAX_LP_FEE + 1));
+        launcher.initialize(wrong, Q96);
+        assertFalse(fresh.initialized());
+        assertEq(fresh.lpFee(), 0);
     }
 
     function test_launchAuthorizationAndFailedSeedRollBack() public {
         ReflectionHook fresh = deployHook(manager, token, trader);
-        PoolKey memory freshKey = fresh.poolKey();
+        PoolKey memory freshKey = launchKey(fresh, LP_FEE);
         vm.prank(address(manager));
         vm.expectRevert(ReflectionHook.NotLaunch.selector);
         fresh.beforeInitialize(other, freshKey, Q96);
+        vm.prank(address(manager));
+        vm.expectRevert(ReflectionHook.NotLaunch.selector);
+        fresh.beforeInitialize(owner, freshKey, Q96);
+        assertFalse(fresh.initialized());
+        vm.expectRevert(hookError(address(fresh), IHooks.beforeInitialize.selector, ReflectionHook.NotLaunch.selector));
+        factory.initialize(freshKey, Q96);
         assertFalse(fresh.initialized());
         vm.prank(address(manager));
         vm.expectRevert(ReflectionHook.LiquidityLocked.selector);
+        fresh.beforeAddLiquidity(address(factory), freshKey, ModifyLiquidityParams(LOWER, UPPER, 1, bytes32(0)), "");
+        // Before the pool is opened there is no pool to add to, even for the launch (trader is this hook's factory).
+        vm.prank(address(manager));
+        vm.expectRevert(ReflectionHook.WrongPool.selector);
         fresh.beforeAddLiquidity(address(trader), freshKey, ModifyLiquidityParams(LOWER, UPPER, 1, bytes32(0)), "");
         trader.initialize(freshKey, Q96);
+        assertTrue(fresh.initialized());
         vm.prank(address(manager));
         vm.expectRevert(ReflectionHook.LiquidityLocked.selector);
         fresh.beforeAddLiquidity(other, freshKey, ModifyLiquidityParams(LOWER, UPPER, 1, bytes32(0)), "");
-        assertFalse(fresh.liquiditySeeded());
-        // Invalid ticks fail after beforeAddLiquidity; its one-use flag must revert too.
+        // Invalid ticks fail after beforeAddLiquidity; the launch can still seed afterwards.
         vm.expectRevert();
         trader.modify(freshKey, ModifyLiquidityParams(1, 2, 1 ether, bytes32(0)));
-        assertFalse(fresh.liquiditySeeded());
-        trader.modify(freshKey, ModifyLiquidityParams(LOWER, UPPER, 1 ether, bytes32(0)));
-        assertTrue(fresh.liquiditySeeded());
+        BalanceDelta seeded = trader.modify(freshKey, ModifyLiquidityParams(LOWER, UPPER, 1 ether, bytes32(0)));
+        assertLt(seeded.amount0(), 0);
+        assertLt(seeded.amount1(), 0);
     }
 
     function test_allCallbacksRejectNonManager() public {
@@ -419,7 +521,7 @@ contract ReflectionHookTest is ReflectionFixture {
         PoolActor freshFactory = new PoolActor(freshManager);
         PoolActor buyer = new PoolActor(freshManager);
         ReflectionHook freshHook = deployHook(freshManager, token, freshFactory);
-        PoolKey memory freshKey = freshHook.poolKey();
+        PoolKey memory freshKey = launchKey(freshHook, LP_FEE);
         token.transfer(address(freshFactory), 1_000_000 ether);
         vm.deal(address(buyer), 10 ether);
         // At the upper tick, the initial position is entirely currency1 (DEF).

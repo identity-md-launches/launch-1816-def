@@ -123,7 +123,8 @@ contract ReflectionInvariantTest is ReflectionFixture {
         assertEq(pm.currencyDelta(address(hook), key.currency1), 0);
         assertEq(pm.currencyDelta(address(trader), key.currency0), 0);
         assertEq(pm.currencyDelta(address(trader), key.currency1), 0);
-        assertTrue(hook.liquiditySeeded());
+        assertTrue(hook.initialized());
+        assertEq(hook.lpFee(), LP_FEE);
         assertEq(hook.owner(), owner);
         assertEq(hook.FEE_BPS(), 225);
     }

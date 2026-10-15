@@ -7,8 +7,8 @@ Scope: `DEF`, `ReflectionHook`, the internal permission/address helpers, and the
 | Area | Implementation / evidence |
 | --- | --- |
 | Callback authentication | All ten IHooks callbacks and unlockCallback check the immutable manager first. Tests invoke every callback from an unauthorized caller. |
-| Pool identity | Exact native ETH/DEF key, static LP fee zero, spacing 60 and this hook. Initialization and enabled trading/liquidity callbacks verify its hash. |
-| Launch authority | Explicit immutable factory; one initialization and one initial addition. Reverts roll back state. The owner has no launch bypass. |
+| Pool identity | beforeInitialize accepts one native ETH/DEF key with spacing 60, this hook and a static LP fee (the dynamic flag is refused; the PoolManager bounds the fee), and records its hash. The enabled trading/liquidity callbacks verify that hash; before initialization it is zero and nothing matches. The LP fee is the factory's manifest value, so the brief's 0 and the policy's 12500 both open. |
+| Launch authority | Explicit immutable factory; one initialization, and liquidity additions only from the factory or the hook itself, with no one-shot flag that could refuse a factory seeding in several positions. Reverts roll back state. The owner has no launch bypass. |
 | Owner isolation | Explicit immutable owner argument, tested independently of deployer and factory; only setSink is privileged. |
 | Address permissions | Constructor checks all 14 bits with upstream Hooks.validateHookPermissions. Tests deploy with actual CREATE2 and test incorrect flags. |
 | Specified delta / NoOp risk | Sell delta is only floor(input × 225 / 10,000), always less than positive specified input. No arbitrary delta, router data, fee override or owner-selected rate exists. |
@@ -16,7 +16,7 @@ Scope: `DEF`, `ReflectionHook`, the internal permission/address helpers, and the
 | Arithmetic | FullMath.mulDiv avoids fee multiplication overflow. Checked SafeCast rejects fee deltas outside int128. The most negative int256 is handled without signed-negation overflow, then safely rejected if its fee is too large. |
 | Rounding | Flooring occurs once per fee. Dust tests cover the 44/45-unit sell fee boundary; fuzz tests verify actual pool and recipient deltas. |
 | Claim settlement | Mint debit is canceled by returned swap delta. Redemption burns first, then takes the same currency and amount to sink. Invariants check outstanding manager deltas are zero. |
-| Redemption authorization | Anyone may trigger flush but cannot select recipient. Only sink may claim, only to itself, and only DEF. Old sink authority is revoked immediately on reassignment. |
+| Redemption authorization | Anyone may trigger flush but cannot select recipient. Only sink may claim, only to itself, and only DEF; while no sink is set, claim reverts NotSink for everyone and claimable is zero for every account, so no entitlement is ever reported for the zero address. Old sink authority is revoked immediately on reassignment. |
 | Reentrancy | The only production external calls are to the trusted immutable PoolManager. DEF is the supplied standard ERC-20 and has no transfer callback. unlockCallback requires both the manager and a pending redemption, consumes that pending flag before burn/take, and uses no arbitrary decoded values. PoolManager's lock rejects nested unlock. |
 | Atomic failure | Failed swaps, invalid liquidity additions and nested redemption leave balances and claims unchanged; tested. |
 | Fresh pool funding | Minting claims needs no preexisting ETH. Tested with a manager seeded with DEF only, then buy and redeem. |
@@ -27,7 +27,7 @@ Scope: `DEF`, `ReflectionHook`, the internal permission/address helpers, and the
 ## Trust and integration assumptions
 
 - Constructor inputs must be the genuine manager and the newly deployed `DEF`. The constructor deliberately does not call contracts or inspect their code, allowing the required empty-chain construction check. A malicious manager or substitute token is outside the contract's deployment assumptions.
-- The factory is trusted to provide the intended initial price/range/funding, initialize and seed atomically, and retain or remove its position according to launch policy. Initialization and addition are single-use. The hook never manages liquidity.
+- The factory is trusted to open the pool at the LP fee its manifest names, to provide the intended initial price/ranges/funding, to initialize and seed atomically, and to retain, remove or re-add its positions according to launch policy. Initialization is single-use; adding liquidity is reserved to the factory for the pool's life. The hook never manages liquidity.
 - The owner controls the recipient of all accrued and future fees by changing sink, including selecting themselves. The owner cannot change the fee or the pool. There is no ownership recovery or transfer.
 - PoolManager's sender is a router/participant address, not a verified end-user. No permission decision depends on trading identity or untrusted hookData. A router allowlist is unnecessary and would violate the requested open trading behavior.
 - Routers enforce minimum received output and refund unused input. Partial sells charge 225 bps of specified input even on an empty or partially executable range; this follows the requested beforeSwap rule. The hook does not promise every valid exact-input request produces output.

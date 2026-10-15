@@ -7,6 +7,7 @@ import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {IUnlockCallback} from "v4-core/src/interfaces/callback/IUnlockCallback.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
 import {FullMath} from "v4-core/src/libraries/FullMath.sol";
+import {LPFeeLibrary} from "v4-core/src/libraries/LPFeeLibrary.sol";
 import {SafeCast} from "v4-core/src/libraries/SafeCast.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
@@ -20,6 +21,7 @@ import {BeforeSwapDelta, BeforeSwapDeltaLibrary, toBeforeSwapDelta} from "v4-cor
 contract ReflectionHook is IHooks, IUnlockCallback {
     using SafeCast for uint256;
     using SafeCast for int128;
+    using LPFeeLibrary for uint24;
 
     error NotPoolManager();
     error NotOwner();
@@ -42,17 +44,19 @@ contract ReflectionHook is IHooks, IUnlockCallback {
 
     uint256 public constant FEE_BPS = 225;
     uint256 private constant BPS_DENOMINATOR = 10_000;
+    int24 public constant TICK_SPACING = 60;
 
     IPoolManager public immutable poolManager;
     DEF public immutable def;
     address public immutable owner;
     address public immutable factory;
-    bytes32 public immutable poolId;
 
     address public sink;
-    bool public initialized;
-    bool public liquiditySeeded;
     bool private flushing;
+    /// @dev The static LP fee of the pool the factory opened; zero until then.
+    uint24 public lpFee;
+    /// @dev The id of the one pool this hook serves; zero until the factory opens it.
+    bytes32 public poolId;
 
     /// @param manager_ The launch chain's Uniswap v4 PoolManager ($poolManager).
     /// @param def_ The DEF token deployed by the launch factory ($token).
@@ -69,7 +73,6 @@ contract ReflectionHook is IHooks, IUnlockCallback {
         def = def_;
         owner = owner_;
         factory = factory_;
-        poolId = PoolId.unwrap(poolKey().toId());
         // An internal, pure check; the constructor makes no calls to external contracts.
         Hooks.validateHookPermissions(IHooks(address(this)), getHookPermissions());
     }
@@ -88,8 +91,15 @@ contract ReflectionHook is IHooks, IUnlockCallback {
         p.afterSwapReturnDelta = true;
     }
 
+    /// @notice The launch pool: native ETH against DEF, tick spacing 60, this hook, at the LP fee the
+    /// factory opened it with. Before initialization the fee field reads zero and `poolId()` is zero.
     function poolKey() public view returns (PoolKey memory) {
-        return PoolKey(Currency.wrap(address(0)), Currency.wrap(address(def)), 0, 60, IHooks(address(this)));
+        return
+            PoolKey(Currency.wrap(address(0)), Currency.wrap(address(def)), lpFee, TICK_SPACING, IHooks(address(this)));
+    }
+
+    function initialized() public view returns (bool) {
+        return poolId != bytes32(0);
     }
 
     function setSink(address newSink) external {
@@ -104,7 +114,8 @@ contract ReflectionHook is IHooks, IUnlockCallback {
     }
 
     function claimable(address account, address currency) external view returns (uint256) {
-        if (account != sink || currency != address(def)) return 0;
+        // Nothing is claimable by anyone until the owner names a sink.
+        if (sink == address(0) || account != sink || currency != address(def)) return 0;
         return collected();
     }
 
@@ -113,7 +124,8 @@ contract ReflectionHook is IHooks, IUnlockCallback {
     }
 
     function claim(address currency, address to) external returns (uint256 amount) {
-        if (msg.sender != sink) revert NotSink();
+        // While no sink is set nobody is the sink, so the zero address cannot pass either check.
+        if (sink == address(0) || msg.sender != sink) revert NotSink();
         if (to != sink) revert NotSink();
         if (currency != address(def)) revert WrongCurrency();
         return _flush();
@@ -140,24 +152,32 @@ contract ReflectionHook is IHooks, IUnlockCallback {
         return abi.encode(amount);
     }
 
+    /// @dev Accepts the pool the launch factory opens: ETH/DEF, spacing 60, this hook, at whichever
+    /// static LP fee the factory's manifest names (the launch policy's tier, never the dynamic flag).
+    /// The PoolManager bounds the fee itself. The accepted key is recorded and is the only pool served.
     function beforeInitialize(address sender, PoolKey calldata key, uint160) external onlyPoolManager returns (bytes4) {
-        _checkPool(key);
-        if (initialized) revert AlreadyInitialized();
+        if (
+            !key.currency0.isAddressZero() || Currency.unwrap(key.currency1) != address(def)
+                || key.tickSpacing != TICK_SPACING || address(key.hooks) != address(this) || key.fee.isDynamicFee()
+        ) {
+            revert WrongPool();
+        }
+        if (initialized()) revert AlreadyInitialized();
         if (sender != factory && sender != address(this)) revert NotLaunch();
-        initialized = true;
+        lpFee = key.fee;
+        poolId = PoolId.unwrap(key.toId());
         return IHooks.beforeInitialize.selector;
     }
 
+    /// @dev Only the launch (the factory, or the hook itself) may add liquidity; everyone else is locked out.
     function beforeAddLiquidity(address sender, PoolKey calldata key, ModifyLiquidityParams calldata, bytes calldata)
         external
+        view
         onlyPoolManager
         returns (bytes4)
     {
+        if (sender != factory && sender != address(this)) revert LiquidityLocked();
         _checkPool(key);
-        if (!initialized || liquiditySeeded || (sender != factory && sender != address(this))) {
-            revert LiquidityLocked();
-        }
-        liquiditySeeded = true;
         return IHooks.beforeAddLiquidity.selector;
     }
 
@@ -210,6 +230,7 @@ contract ReflectionHook is IHooks, IUnlockCallback {
         return Currency.wrap(address(def));
     }
 
+    /// @dev Before initialization poolId is zero, which no key hashes to, so every pool is refused.
     function _checkPool(PoolKey calldata key) private view {
         if (PoolId.unwrap(key.toId()) != poolId) revert WrongPool();
     }
