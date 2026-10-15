@@ -1,0 +1,33 @@
+{
+  "kind": "univ4_hook",
+  "hook": {
+    "contract": "ReflectionHook",
+    "constructorArgs": [
+      "$poolManager",
+      "$token",
+      "$owner",
+      "$factory"
+    ],
+    "permissions": [
+      "beforeInitialize",
+      "beforeAddLiquidity",
+      "beforeSwap",
+      "afterSwap",
+      "beforeSwapReturnDelta",
+      "afterSwapReturnDelta"
+    ]
+  },
+  "token": {
+    "contract": "DEF",
+    "name": "DEF",
+    "symbol": "DEF",
+    "decimals": 18
+  },
+  "pool": {
+    "pairedCurrency": "0x0000000000000000000000000000000000000000",
+    "fee": 12500,
+    "tickSpacing": 60,
+    "initialPrice": "79228162514264337593543950336"
+  },
+  "notes": "BLOCKING: ReflectionHook.poolKey() hardcodes LP fee 0, and beforeInitialize checks that pool's ID, so the implementation rejects the launch policy's required 12500 LP fee declared here. The hook must be returned for correction before launch; this manifest cannot change its pool key. ReflectionHook charges an immutable 225 bps of DEF on exact-input ETH/DEF swaps: buys mint DEF ERC-6909 claims in afterSwap and deduct the fee from DEF output; sells mint claims in beforeSwap and return the fee as the specified delta. Exact-output swaps revert. The hook charges no ETH. collected() reads its DEF claim balance. Anyone can flush all claims through PoolManager.unlock to the current sink; the sink can pull the same amount through claim(DEF, sink), with claimable limited to that sink and DEF. The owner can only set or move the nonzero sink using setSink; no sink address is required at construction. Initialization accepts only the factory or hook itself for its fixed pool, once; one launch liquidity addition is permitted, and subsequent additions revert. Removal and donation permissions are disabled and their callbacks return no fee or delta. Constructor arguments are PoolManager, DEF token, owner and launch factory, in that order. The declared pool is native ETH/DEF with tick spacing 60 and the launch reference's initialPrice."
+}
